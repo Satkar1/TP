@@ -60,11 +60,11 @@ class TravelPlanner:
             available_models = [m.name for m in genai.list_models() 
                               if 'generateContent' in m.supported_generation_methods]
             
-            if 'models/gemini-1.5-pro' not in available_models:
+            if 'models/gemini-2.0-flash-exp' not in available_models:
                 st.warning("Gemini 1.5 Pro not available, falling back to Gemini Flash")
-                self.model_name = "gemini-1.5-flash"
+                self.model_name = "gemini-2.0-flash-exp"
             else:
-                self.model_name = "gemini-1.5-pro"
+                self.model_name = "gemini-2.0-flash-exp"
                 
             self.llm = ChatGoogleGenerativeAI(
                 model=self.model_name,
