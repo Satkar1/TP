@@ -1,0 +1,31 @@
+app:
+  name: "AI Travel Planner Pro"
+  description: "Comprehensive travel planning with AI assistance"
+  version: "2.0.0"
+  debug: false
+
+ui:
+  theme:
+    primary_color: "#4b8bff"
+    secondary_color: "#ff6b6b"
+    background_color: "#f8f9fa"
+    text_color: "#333333"
+  layout:
+    sidebar_width: 280
+    main_max_width: 1200
+
+api:
+  gemini:
+    model: "gemini-1.5-pro"
+    temperature: 0.7
+    max_tokens: 2048
+  openweather:
+    base_url: "https://api.openweathermap.org/data/2.5"
+    icon_url: "https://openweathermap.org/img/wn/{icon}@2x.png"
+
+features:
+  enable_weather: true
+  enable_maps: true
+  enable_packing: true
+  enable_budget: true
+  enable_saving: true
