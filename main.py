@@ -57,10 +57,6 @@ class TravelPlanner:
         """Initialize the Gemini model"""
         try:
             genai.configure(api_key=self.gemini_api_key)
-            available_models = [m.name for m in genai.list_models() 
-                              if 'generateContent' in m.supported_generation_methods]
-            
-            # Use gemini-2.0-flash-exp as specified
             self.model_name = "gemini-2.0-flash-exp"
                 
             self.llm = ChatGoogleGenerativeAI(
@@ -138,20 +134,6 @@ class TravelPlanner:
         if 'saved_trips' not in st.session_state:
             st.session_state.saved_trips = []
     
-    def _get_weather(self, city: str) -> Optional[Dict]:
-        """Get weather data for a city"""
-        if not self.weather_api_key or not config["features"]["enable_weather"]:
-            return None
-            
-        try:
-            url = f"{config['api']['openweather']['base_url']}/weather?q={city}&appid={self.weather_api_key}&units=metric"
-            response = requests.get(url)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            st.warning(f"Could not fetch weather data: {e}")
-            return None
-    
     def _generate_travel_prompt(self, source: str, destination: str) -> str:
         """Generate the prompt for travel recommendations"""
         return f"""
@@ -212,7 +194,8 @@ class TravelPlanner:
                         "Directness": cells[4],
                         "Notes": cells[5]
                     }
-                    result["travel_options"].append(option)
+                    if "not available" not in option["Notes"].lower():
+                        result["travel_options"].append(option)
         
         # Parse packing list
         packing_match = re.search(r"Categories:\s*([\s\S]+)$", response)
@@ -229,14 +212,7 @@ class TravelPlanner:
             st.warning("No travel options available.")
             return
         
-        # Filter out unavailable options
-        available_options = [opt for opt in options if "not available" not in opt.get("Notes", "").lower()]
-        
-        if not available_options:
-            st.warning("No available travel options found between these locations.")
-            return
-        
-        df = pd.DataFrame(available_options)
+        df = pd.DataFrame(options)
         
         # Convert price to numeric for sorting
         df['Numeric Price'] = df['Price (USD)'].str.extract(r'(\d+)').astype(float)
