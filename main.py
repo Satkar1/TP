@@ -60,12 +60,10 @@ class TravelPlanner:
             available_models = [m.name for m in genai.list_models() 
                               if 'generateContent' in m.supported_generation_methods]
             
-            if 'models/gemini-2.0-flash-exp' in available_models:
+            if 'models/gemini-2.0-flash-exp' not in available_models:
+                st.warning("Gemini 1.5 Pro not available, falling back to Gemini Flash")
                 self.model_name = "gemini-2.0-flash-exp"
-            elif 'models/gemini-pro' in available_models:
-                self.model_name = "gemini-pro"
             else:
-                st.warning("Gemini Pro not available, falling back to Gemini Flash")
                 self.model_name = "gemini-2.0-flash-exp"
                 
             self.llm = ChatGoogleGenerativeAI(
@@ -161,26 +159,24 @@ class TravelPlanner:
         """Generate the prompt for travel recommendations"""
         return f"""
         You are an expert travel planner assistant. Provide comprehensive travel options from {source} to {destination}. 
-        Include all relevant details and present the information in structured markdown format EXACTLY as specified.
-
+        Include all relevant details and present the information in structured markdown format.
+        
         ## Travel Options
         
-        Create a detailed comparison table with the following columns. Fill ALL fields with realistic estimates:
+        | Mode | Price (USD) | Duration | Comfort (1-5) | Directness | Notes |
+        |------|------------|----------|--------------|------------|-------|
+        | Flight | | | | | |
+        | Train | | | | | |
+        | Bus | | | | | |
+        | Rental Car | | | | | |
+        | Taxi/Uber | | | | | |
         
-        | Mode | Price Range (USD) | Duration | Comfort (1-5) | Directness | Notes |
-        |------|------------------|----------|--------------|------------|-------|
-        | Flight | $300-$600 | 2h 30m | 5 | Direct | Book 2-3 months in advance |
-        | Train | $150-$300 | 4h 15m | 4 | Direct | Scenic route available |
-        | Bus | $50-$120 | 6h | 2 | Direct | Multiple daily departures |
-        | Rental Car | $70/day + fuel | 5h | 3 | Direct | Requires driver's license |
-        | Taxi/Uber | $400-$500 | 2h 45m | 4 | Direct | Most expensive option |
-        
-        IMPORTANT:
-        - Include ALL transportation modes listed above
-        - Provide REALISTIC estimates for each field
-        - Duration should be in hours/minutes format (e.g., "2h 30m")
-        - Price ranges should reflect current market rates
-        - Notes should include important considerations
+        Fill in the table with accurate estimates. Include:
+        - Price range in USD
+        - Estimated duration in hours/minutes
+        - Comfort level (1-5, 5 being most comfortable)
+        - Directness (Direct/Indirect)
+        - Any important notes
         
         ## Destination Information
         
@@ -189,27 +185,21 @@ class TravelPlanner:
         ### Top Attractions (5)
         Name | Description | Entry Fee | Best Time to Visit
         ---- | ----------- | --------- | ------------------
-        [Attraction 1] | [Brief description] | $X or Free | [Time recommendation]
-        [Attraction 2] | [Brief description] | $X or Free | [Time recommendation]
         
         ### Accommodation Options (5)
         Name | Type | Price Range | Rating | Distance from Center
         ---- | ---- | ----------- | ------ | --------------------
-        [Hotel 1] | [Hotel/Hostel/etc] | $X-$Y | 4.5/5 | 1.2 miles
-        [Hotel 2] | [Hotel/Hostel/etc] | $X-$Y | 4.2/5 | 0.5 miles
         
         ### Dining Recommendations (5)
         Name | Cuisine | Price Range | Rating | Specialty
         ---- | ------- | ----------- | ------ | ---------
-        [Restaurant 1] | [Cuisine type] | $X-$Y | 4.7/5 | [Signature dish]
-        [Restaurant 2] | [Cuisine type] | $X-$Y | 4.5/5 | [Signature dish]
         
         ### Local Tips
-        - Best time to visit: [Month/Season]
-        - Cultural norms to be aware of: [Important notes]
-        - Must-try local dishes: [Dish 1], [Dish 2]
-        - Transportation tips: [Key advice]
-        - Safety advice: [Important warnings]
+        - Best time to visit
+        - Cultural norms to be aware of
+        - Must-try local dishes
+        - Transportation tips
+        - Safety advice
         
         ## Packing Suggestions
         Based on:
@@ -218,38 +208,15 @@ class TravelPlanner:
         - Cultural norms
         - Planned activities
         
-        Provide a categorized packing list with essentials:
-        
-        ### Clothing
-        - [Item 1]
-        - [Item 2]
-        
-        ### Toiletries
-        - [Item 1]
-        - [Item 2]
-        
-        ### Electronics
-        - [Item 1]
-        - [Item 2]
-        
-        ### Documents
-        - [Item 1]
-        - [Item 2]
-        
-        ### Miscellaneous
-        - [Item 1]
-        - [Item 2]
+        Provide a categorized packing list with essentials.
         """
     
     def _generate_packing_list(self, destination: str, weather_data: Optional[Dict] = None) -> str:
         """Generate packing list based on destination and weather"""
-        weather_desc = weather_data['weather'][0]['description'] if weather_data else 'unknown'
-        temp = weather_data['main']['temp'] if weather_data else 'unknown'
-        
         prompt = f"""
         Create a detailed packing list for a trip to {destination}. Consider:
-        - Current weather: {weather_desc}
-        - Temperature: {temp}°C
+        - Current weather: {weather_data['weather'][0]['description'] if weather_data else 'unknown'}
+        - Temperature: {weather_data['main']['temp'] if weather_data else 'unknown'}°C
         - Typical activities (sightseeing, hiking, etc.)
         - Cultural norms (modest clothing, etc.)
         
@@ -290,154 +257,97 @@ class TravelPlanner:
             "packing": ""
         }
         
-        # Debug: Show raw response
-        if config.get("debug", False):
-            with st.expander("Debug: Raw Response"):
-                st.code(response)
-        
-        # Parse travel options - more flexible matching
-        travel_match = re.search(r"## Travel Options[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n##|\Z)", response)
+        # Parse travel options
+        travel_match = re.search(r"## Travel Options\n([\s\S]+?)##", response)
         if travel_match:
-            travel_table = travel_match.group(1).strip()
+            travel_table = travel_match.group(1)
             result["travel_options"] = self._parse_markdown_table(travel_table)
-            if config.get("debug", False):
-                with st.expander("Debug: Parsed Travel Options"):
-                    st.json(result["travel_options"])
         
         # Parse attractions
-        attractions_match = re.search(r"### Top Attractions[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n###|\Z)", response)
+        attractions_match = re.search(r"### Top Attractions \(5\)\n([\s\S]+?)\n\n###", response)
         if attractions_match:
-            attractions_table = attractions_match.group(1).strip()
+            attractions_table = attractions_match.group(1)
             result["attractions"] = self._parse_markdown_table(attractions_table)
         
         # Parse accommodations
-        accommodations_match = re.search(r"### Accommodation Options[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n###|\Z)", response)
+        accommodations_match = re.search(r"### Accommodation Options \(5\)\n([\s\S]+?)\n\n###", response)
         if accommodations_match:
-            accommodations_table = accommodations_match.group(1).strip()
+            accommodations_table = accommodations_match.group(1)
             result["accommodations"] = self._parse_markdown_table(accommodations_table)
         
         # Parse dining
-        dining_match = re.search(r"### Dining Recommendations[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n###|\Z)", response)
+        dining_match = re.search(r"### Dining Recommendations \(5\)\n([\s\S]+?)\n\n###", response)
         if dining_match:
-            dining_table = dining_match.group(1).strip()
+            dining_table = dining_match.group(1)
             result["dining"] = self._parse_markdown_table(dining_table)
         
         # Parse tips
-        tips_match = re.search(r"### Local Tips\n([\s\S]+?)(?=\n\n##|\Z)", response)
+        tips_match = re.search(r"### Local Tips\n([\s\S]+?)\n\n##", response)
         if tips_match:
             result["tips"] = tips_match.group(1).strip()
         
         # Parse packing
-        packing_match = re.search(r"## Packing Suggestions\n([\s\S]+?)(?=\Z)", response)
+        packing_match = re.search(r"## Packing Suggestions\n([\s\S]+)$", response)
         if packing_match:
             result["packing"] = packing_match.group(1).strip()
         
         return result
     
     def _parse_markdown_table(self, table_text: str) -> List[Dict]:
-        """Parse markdown table into list of dictionaries with improved handling"""
-        if not table_text:
-            return []
-            
+        """Parse markdown table into list of dictionaries"""
         lines = [line.strip() for line in table_text.split('\n') if line.strip()]
         if len(lines) < 2:
             return []
         
-        # Handle both |-separated and space-aligned tables
-        if '|' in lines[0]:
-            # Remove empty columns from split
-            headers = [h.strip() for h in lines[0].split('|') if h.strip()]
-            data = []
-            
-            for line in lines[2:]:
-                values = [v.strip() for v in line.split('|') if v.strip()]
-                if len(values) == len(headers):
-                    data.append(dict(zip(headers, values)))
-        else:
-            # Handle space-aligned tables (less common)
-            headers = [h.strip() for h in re.split(r'\s{2,}', lines[0]) if h.strip()]
-            data = []
-            
-            for line in lines[2:]:
-                values = [v.strip() for v in re.split(r'\s{2,}', line) if v.strip()]
-                if len(values) == len(headers):
-                    data.append(dict(zip(headers, values)))
+        headers = [h.strip() for h in lines[0].split('|')[1:-1]]
+        data = []
+        
+        for line in lines[2:]:
+            values = [v.strip() for v in line.split('|')[1:-1]]
+            if len(values) == len(headers):
+                data.append(dict(zip(headers, values)))
         
         return data
     
     def _display_travel_options(self, options: List[Dict]):
-        """Display travel options with improved validation and visualization"""
+        """Display travel options in an interactive way"""
         st.subheader("Travel Options")
         
         if not options:
-            st.error("""
-            No travel options could be generated. Possible reasons:
-            - The route between these cities may not exist
-            - The AI response format wasn't parsed correctly
-            - There was an error processing the data
-            """)
+            st.warning("No travel options available.")
             return
         
-        try:
-            # Convert to DataFrame with validation
-            df = pd.DataFrame(options)
+        df = pd.DataFrame(options)
+        
+        # Convert price to numeric for sorting
+        df['Price (USD)'] = df['Price (USD)'].str.extract(r'(\d+)').astype(float)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.dataframe(df, hide_index=True, use_container_width=True)
+        
+        with col2:
+            # Price comparison chart
+            fig_price = px.bar(
+                df, 
+                x='Mode', 
+                y='Price (USD)', 
+                title='Price Comparison',
+                color='Mode'
+            )
+            st.plotly_chart(fig_price, use_container_width=True)
             
-            # Validate required columns
-            required_cols = ['Mode', 'Price Range (USD)', 'Duration']
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            if missing_cols:
-                st.error(f"Missing required columns: {', '.join(missing_cols)}")
-                return
-            
-            # Clean and process data
-            df['Price Min'] = df['Price Range (USD)'].str.extract(r'\$(\d+)').astype(float)
-            df['Price Max'] = df['Price Range (USD)'].str.extract(r'\$(\d+)[^\d]*$').astype(float)
-            df['Price Avg'] = (df['Price Min'] + df['Price Max']) / 2
-            
-            # Extract numeric comfort if available
-            if 'Comfort (1-5)' in df.columns:
-                df['Comfort'] = df['Comfort (1-5)'].str.extract(r'(\d)').astype(float)
-            
-            # Display
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.dataframe(df.drop(['Price Min', 'Price Max', 'Price Avg'], axis=1, errors='ignore'), 
-                            hide_index=True, 
-                            use_container_width=True)
-            
-            with col2:
-                # Price comparison
-                fig_price = px.bar(
-                    df,
-                    x='Mode',
-                    y='Price Avg',
-                    error_y=df['Price Max'] - df['Price Avg'],
-                    error_y_minus=df['Price Avg'] - df['Price Min'],
-                    title='Price Comparison (USD)',
-                    labels={'Price Avg': 'Average Price'},
-                    color='Mode'
-                )
-                st.plotly_chart(fig_price, use_container_width=True)
-                
-                # Comfort comparison if available
-                if 'Comfort' in df.columns:
-                    fig_comfort = px.bar(
-                        df,
-                        x='Mode',
-                        y='Comfort',
-                        title='Comfort Level (1-5)',
-                        color='Mode',
-                        range_y=[0, 5]
-                    )
-                    st.plotly_chart(fig_comfort, use_container_width=True)
-                
-        except Exception as e:
-            st.error(f"Error displaying travel options: {str(e)}")
-            if config.get("debug", False):
-                st.write("Options data:", options)
-
-    # [Rest of your methods remain unchanged...]
+            # Duration comparison chart
+            fig_duration = px.bar(
+                df, 
+                x='Mode', 
+                y='Duration', 
+                title='Duration Comparison',
+                color='Mode'
+            )
+            st.plotly_chart(fig_duration, use_container_width=True)
+    
     def _display_destination_map(self, destination: str):
         """Display a map centered on the destination"""
         if not config["features"]["enable_maps"]:
@@ -630,25 +540,20 @@ class TravelPlanner:
             # Calculate total
             if st.button("Calculate Budget"):
                 # Get transport cost
-                try:
-                    transport_cost = next(
-                        (float(re.search(r'\$(\d+)', opt['Price Range (USD)']).group(1))
-                        for opt in travel_options 
-                        if opt['Mode'] == transport_mode)
-                    )
-                except:
-                    transport_cost = 0
+                transport_cost = next(
+                    (float(re.search(r'(\d+)', opt['Price (USD)']).group()) 
+                    for opt in travel_options 
+                    if opt['Mode'] == transport_mode)
+                )
                 
                 # Get accommodation cost
                 if accommodation:
-                    try:
-                        acc_cost = next(
-                            float(re.search(r'\$(\d+)', acc['Price Range']).group(1))
-                            for acc in accommodations 
-                            if acc['Name'] == accommodation)
-                        acc_total = acc_cost * nights
-                    except:
-                        acc_total = 0
+                    acc_cost = next(
+                        (float(re.search(r'(\d+)', acc['Price Range']).group()) 
+                        for acc in accommodations 
+                        if acc['Name'] == accommodation)
+                    )
+                    acc_total = acc_cost * nights
                 else:
                     acc_total = 0
                 
