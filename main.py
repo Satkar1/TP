@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
+from langchain.memory import ConversationBufferMemory
 import google.generativeai as genai
 
 # Load configuration
@@ -57,14 +58,9 @@ class TravelPlanner:
         """Initialize the Gemini model"""
         try:
             genai.configure(api_key=self.gemini_api_key)
-            available_models = [m.name for m in genai.list_models() 
-                              if 'generateContent' in m.supported_generation_methods]
             
-            if 'models/gemini-2.0-flash-exp' not in available_models:
-                st.warning("Gemini 1.5 Pro not available, falling back to Gemini Flash")
-                self.model_name = "gemini-2.0-flash-exp"
-            else:
-                self.model_name = "gemini-2.0-flash-exp"
+            # Force use of gemini-2.0-flash-exp
+            self.model_name = "gemini-2.0-flash-exp"
                 
             self.llm = ChatGoogleGenerativeAI(
                 model=self.model_name,
@@ -72,6 +68,9 @@ class TravelPlanner:
                 temperature=config["api"]["gemini"]["temperature"],
                 max_output_tokens=config["api"]["gemini"]["max_tokens"]
             )
+            
+            # Setup conversation memory
+            self.memory = ConversationBufferMemory()
         except Exception as e:
             st.error(f"Error initializing Gemini model: {e}")
             st.stop()
@@ -127,6 +126,22 @@ class TravelPlanner:
                 box-shadow: 0 2px 8px rgba(0,0,0,0.1);
                 margin-bottom: 1rem;
             }}
+            .chat-message {{
+                padding: 1rem;
+                border-radius: 8px;
+                margin: 0.5rem 0;
+                background-color: #f0f2f6;
+            }}
+            .user-message {{
+                background-color: {primary_color};
+                color: white;
+                margin-left: 20%;
+            }}
+            .ai-message {{
+                background-color: {secondary_color};
+                color: white;
+                margin-right: 20%;
+            }}
         </style>
         """, unsafe_allow_html=True)
     
@@ -140,6 +155,8 @@ class TravelPlanner:
             st.session_state.weather_data = None
         if 'saved_trips' not in st.session_state:
             st.session_state.saved_trips = []
+        if 'chat_history' not in st.session_state:
+            st.session_state.chat_history = []
     
     def _get_weather(self, city: str) -> Optional[Dict]:
         """Get weather data for a city"""
@@ -157,26 +174,36 @@ class TravelPlanner:
     
     def _generate_travel_prompt(self, source: str, destination: str) -> str:
         """Generate the prompt for travel recommendations"""
+        # Include chat history in prompt for context
+        chat_context = ""
+        if st.session_state.chat_history:
+            chat_context = "\nPrevious conversation:\n" + "\n".join(
+                f"{'User' if msg['role'] == 'user' else 'AI'}: {msg['content']}" 
+                for msg in st.session_state.chat_history[-3:]  # Last 3 messages
+            )
+        
         return f"""
         You are an expert travel planner assistant. Provide comprehensive travel options from {source} to {destination}. 
-        Include all relevant details and present the information in structured markdown format.
+        {chat_context}
         
         ## Travel Options
         
-        | Mode | Price (USD) | Duration | Comfort (1-5) | Directness | Notes |
-        |------|------------|----------|--------------|------------|-------|
-        | Flight | | | | | |
-        | Train | | | | | |
-        | Bus | | | | | |
-        | Rental Car | | | | | |
-        | Taxi/Uber | | | | | |
+        Create a detailed comparison table with the following columns. Fill ALL fields with realistic estimates:
         
-        Fill in the table with accurate estimates. Include:
-        - Price range in USD
-        - Estimated duration in hours/minutes
-        - Comfort level (1-5, 5 being most comfortable)
-        - Directness (Direct/Indirect)
-        - Any important notes
+        | Mode | Price Range (USD) | Duration | Comfort (1-5) | Directness | Notes |
+        |------|------------------|----------|--------------|------------|-------|
+        | Flight | $300-$600 | 2h 30m | 5 | Direct | Book 2-3 months in advance |
+        | Train | $150-$300 | 4h 15m | 4 | Direct | Scenic route available |
+        | Bus | $50-$120 | 6h | 2 | Direct | Multiple daily departures |
+        | Rental Car | $70/day + fuel | 5h | 3 | Direct | Requires driver's license |
+        | Taxi/Uber | $400-$500 | 2h 45m | 4 | Direct | Most expensive option |
+        
+        IMPORTANT:
+        - Include ALL transportation modes listed above
+        - Provide REALISTIC estimates for each field
+        - Duration should be in hours/minutes format (e.g., "2h 30m")
+        - Price ranges should reflect current market rates
+        - Notes should include important considerations
         
         ## Destination Information
         
@@ -185,21 +212,27 @@ class TravelPlanner:
         ### Top Attractions (5)
         Name | Description | Entry Fee | Best Time to Visit
         ---- | ----------- | --------- | ------------------
+        [Attraction 1] | [Brief description] | $X or Free | [Time recommendation]
+        [Attraction 2] | [Brief description] | $X or Free | [Time recommendation]
         
         ### Accommodation Options (5)
         Name | Type | Price Range | Rating | Distance from Center
         ---- | ---- | ----------- | ------ | --------------------
+        [Hotel 1] | [Hotel/Hostel/etc] | $X-$Y | 4.5/5 | 1.2 miles
+        [Hotel 2] | [Hotel/Hostel/etc] | $X-$Y | 4.2/5 | 0.5 miles
         
         ### Dining Recommendations (5)
         Name | Cuisine | Price Range | Rating | Specialty
         ---- | ------- | ----------- | ------ | ---------
+        [Restaurant 1] | [Cuisine type] | $X-$Y | 4.7/5 | [Signature dish]
+        [Restaurant 2] | [Cuisine type] | $X-$Y | 4.5/5 | [Signature dish]
         
         ### Local Tips
-        - Best time to visit
-        - Cultural norms to be aware of
-        - Must-try local dishes
-        - Transportation tips
-        - Safety advice
+        - Best time to visit: [Month/Season]
+        - Cultural norms to be aware of: [Important notes]
+        - Must-try local dishes: [Dish 1], [Dish 2]
+        - Transportation tips: [Key advice]
+        - Safety advice: [Important warnings]
         
         ## Packing Suggestions
         Based on:
@@ -208,15 +241,38 @@ class TravelPlanner:
         - Cultural norms
         - Planned activities
         
-        Provide a categorized packing list with essentials.
+        Provide a categorized packing list with essentials:
+        
+        ### Clothing
+        - [Item 1]
+        - [Item 2]
+        
+        ### Toiletries
+        - [Item 1]
+        - [Item 2]
+        
+        ### Electronics
+        - [Item 1]
+        - [Item 2]
+        
+        ### Documents
+        - [Item 1]
+        - [Item 2]
+        
+        ### Miscellaneous
+        - [Item 1]
+        - [Item 2]
         """
     
     def _generate_packing_list(self, destination: str, weather_data: Optional[Dict] = None) -> str:
         """Generate packing list based on destination and weather"""
+        weather_desc = weather_data['weather'][0]['description'] if weather_data else 'unknown'
+        temp = weather_data['main']['temp'] if weather_data else 'unknown'
+        
         prompt = f"""
         Create a detailed packing list for a trip to {destination}. Consider:
-        - Current weather: {weather_data['weather'][0]['description'] if weather_data else 'unknown'}
-        - Temperature: {weather_data['main']['temp'] if weather_data else 'unknown'}°C
+        - Current weather: {weather_desc}
+        - Temperature: {temp}°C
         - Typical activities (sightseeing, hiking, etc.)
         - Cultural norms (modest clothing, etc.)
         
@@ -242,7 +298,15 @@ class TravelPlanner:
         
         try:
             chain = LLMChain(llm=self.llm, prompt=PromptTemplate.from_template(prompt))
-            return chain.run({})
+            result = chain.run({})
+            
+            # Add to chat history
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": f"Generated packing list for {destination}"
+            })
+            
+            return result
         except Exception as e:
             return f"Could not generate packing list: {e}"
     
@@ -257,97 +321,153 @@ class TravelPlanner:
             "packing": ""
         }
         
-        # Parse travel options
-        travel_match = re.search(r"## Travel Options\n([\s\S]+?)##", response)
+        # Debug: Show raw response
+        if config.get("debug", False):
+            with st.expander("Debug: Raw Response"):
+                st.code(response)
+        
+        # Parse travel options - more flexible matching
+        travel_match = re.search(r"## Travel Options[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n##|\Z)", response)
         if travel_match:
-            travel_table = travel_match.group(1)
+            travel_table = travel_match.group(1).strip()
             result["travel_options"] = self._parse_markdown_table(travel_table)
+            if config.get("debug", False):
+                with st.expander("Debug: Parsed Travel Options"):
+                    st.json(result["travel_options"])
         
         # Parse attractions
-        attractions_match = re.search(r"### Top Attractions \(5\)\n([\s\S]+?)\n\n###", response)
+        attractions_match = re.search(r"### Top Attractions[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n###|\Z)", response)
         if attractions_match:
-            attractions_table = attractions_match.group(1)
+            attractions_table = attractions_match.group(1).strip()
             result["attractions"] = self._parse_markdown_table(attractions_table)
         
         # Parse accommodations
-        accommodations_match = re.search(r"### Accommodation Options \(5\)\n([\s\S]+?)\n\n###", response)
+        accommodations_match = re.search(r"### Accommodation Options[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n###|\Z)", response)
         if accommodations_match:
-            accommodations_table = accommodations_match.group(1)
+            accommodations_table = accommodations_match.group(1).strip()
             result["accommodations"] = self._parse_markdown_table(accommodations_table)
         
         # Parse dining
-        dining_match = re.search(r"### Dining Recommendations \(5\)\n([\s\S]+?)\n\n###", response)
+        dining_match = re.search(r"### Dining Recommendations[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n###|\Z)", response)
         if dining_match:
-            dining_table = dining_match.group(1)
+            dining_table = dining_match.group(1).strip()
             result["dining"] = self._parse_markdown_table(dining_table)
         
         # Parse tips
-        tips_match = re.search(r"### Local Tips\n([\s\S]+?)\n\n##", response)
+        tips_match = re.search(r"### Local Tips\n([\s\S]+?)(?=\n\n##|\Z)", response)
         if tips_match:
             result["tips"] = tips_match.group(1).strip()
         
         # Parse packing
-        packing_match = re.search(r"## Packing Suggestions\n([\s\S]+)$", response)
+        packing_match = re.search(r"## Packing Suggestions\n([\s\S]+?)(?=\Z)", response)
         if packing_match:
             result["packing"] = packing_match.group(1).strip()
         
         return result
     
     def _parse_markdown_table(self, table_text: str) -> List[Dict]:
-        """Parse markdown table into list of dictionaries"""
+        """Parse markdown table into list of dictionaries with improved handling"""
+        if not table_text:
+            return []
+            
         lines = [line.strip() for line in table_text.split('\n') if line.strip()]
         if len(lines) < 2:
             return []
         
-        headers = [h.strip() for h in lines[0].split('|')[1:-1]]
-        data = []
-        
-        for line in lines[2:]:
-            values = [v.strip() for v in line.split('|')[1:-1]]
-            if len(values) == len(headers):
-                data.append(dict(zip(headers, values)))
+        # Handle both |-separated and space-aligned tables
+        if '|' in lines[0]:
+            # Remove empty columns from split
+            headers = [h.strip() for h in lines[0].split('|') if h.strip()]
+            data = []
+            
+            for line in lines[2:]:
+                values = [v.strip() for v in line.split('|') if v.strip()]
+                if len(values) == len(headers):
+                    data.append(dict(zip(headers, values)))
+        else:
+            # Handle space-aligned tables (less common)
+            headers = [h.strip() for h in re.split(r'\s{2,}', lines[0]) if h.strip()]
+            data = []
+            
+            for line in lines[2:]:
+                values = [v.strip() for v in re.split(r'\s{2,}', line) if v.strip()]
+                if len(values) == len(headers):
+                    data.append(dict(zip(headers, values)))
         
         return data
     
     def _display_travel_options(self, options: List[Dict]):
-        """Display travel options in an interactive way"""
+        """Display travel options with improved validation and visualization"""
         st.subheader("Travel Options")
         
         if not options:
-            st.warning("No travel options available.")
+            st.error("""
+            No travel options could be generated. Possible reasons:
+            - The route between these cities may not exist
+            - The AI response format wasn't parsed correctly
+            - There was an error processing the data
+            """)
             return
         
-        df = pd.DataFrame(options)
-        
-        # Convert price to numeric for sorting
-        df['Price (USD)'] = df['Price (USD)'].str.extract(r'(\d+)').astype(float)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.dataframe(df, hide_index=True, use_container_width=True)
-        
-        with col2:
-            # Price comparison chart
-            fig_price = px.bar(
-                df, 
-                x='Mode', 
-                y='Price (USD)', 
-                title='Price Comparison',
-                color='Mode'
-            )
-            st.plotly_chart(fig_price, use_container_width=True)
+        try:
+            # Convert to DataFrame with validation
+            df = pd.DataFrame(options)
             
-            # Duration comparison chart
-            fig_duration = px.bar(
-                df, 
-                x='Mode', 
-                y='Duration', 
-                title='Duration Comparison',
-                color='Mode'
-            )
-            st.plotly_chart(fig_duration, use_container_width=True)
-    
+            # Validate required columns
+            required_cols = ['Mode', 'Price Range (USD)', 'Duration']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                st.error(f"Missing required columns: {', '.join(missing_cols)}")
+                return
+            
+            # Clean and process data
+            df['Price Min'] = df['Price Range (USD)'].str.extract(r'\$(\d+)').astype(float)
+            df['Price Max'] = df['Price Range (USD)'].str.extract(r'\$(\d+)[^\d]*$').astype(float)
+            df['Price Avg'] = (df['Price Min'] + df['Price Max']) / 2
+            
+            # Extract numeric comfort if available
+            if 'Comfort (1-5)' in df.columns:
+                df['Comfort'] = df['Comfort (1-5)'].str.extract(r'(\d)').astype(float)
+            
+            # Display
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.dataframe(df.drop(['Price Min', 'Price Max', 'Price Avg'], axis=1, errors='ignore'), 
+                            hide_index=True, 
+                            use_container_width=True)
+            
+            with col2:
+                # Price comparison
+                fig_price = px.bar(
+                    df,
+                    x='Mode',
+                    y='Price Avg',
+                    error_y=df['Price Max'] - df['Price Avg'],
+                    error_y_minus=df['Price Avg'] - df['Price Min'],
+                    title='Price Comparison (USD)',
+                    labels={'Price Avg': 'Average Price'},
+                    color='Mode'
+                )
+                st.plotly_chart(fig_price, use_container_width=True)
+                
+                # Comfort comparison if available
+                if 'Comfort' in df.columns:
+                    fig_comfort = px.bar(
+                        df,
+                        x='Mode',
+                        y='Comfort',
+                        title='Comfort Level (1-5)',
+                        color='Mode',
+                        range_y=[0, 5]
+                    )
+                    st.plotly_chart(fig_comfort, use_container_width=True)
+                
+        except Exception as e:
+            st.error(f"Error displaying travel options: {str(e)}")
+            if config.get("debug", False):
+                st.write("Options data:", options)
+
     def _display_destination_map(self, destination: str):
         """Display a map centered on the destination"""
         if not config["features"]["enable_maps"]:
@@ -463,6 +583,12 @@ class TravelPlanner:
         
         st.session_state.saved_trips.append(trip)
         st.success("Trip saved successfully!")
+        
+        # Add to chat history
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": f"Saved trip from {source} to {destination}"
+        })
     
     def _display_saved_trips(self):
         """Display saved trips in sidebar"""
@@ -540,20 +666,25 @@ class TravelPlanner:
             # Calculate total
             if st.button("Calculate Budget"):
                 # Get transport cost
-                transport_cost = next(
-                    (float(re.search(r'(\d+)', opt['Price (USD)']).group()) 
-                    for opt in travel_options 
-                    if opt['Mode'] == transport_mode)
-                )
+                try:
+                    transport_cost = next(
+                        (float(re.search(r'\$(\d+)', opt['Price Range (USD)']).group(1))
+                        for opt in travel_options 
+                        if opt['Mode'] == transport_mode)
+                    )
+                except:
+                    transport_cost = 0
                 
                 # Get accommodation cost
                 if accommodation:
-                    acc_cost = next(
-                        (float(re.search(r'(\d+)', acc['Price Range']).group()) 
-                        for acc in accommodations 
-                        if acc['Name'] == accommodation)
-                    )
-                    acc_total = acc_cost * nights
+                    try:
+                        acc_cost = next(
+                            float(re.search(r'\$(\d+)', acc['Price Range']).group(1))
+                            for acc in accommodations 
+                            if acc['Name'] == accommodation)
+                        acc_total = acc_cost * nights
+                    except:
+                        acc_total = 0
                 else:
                     acc_total = 0
                 
@@ -582,6 +713,57 @@ class TravelPlanner:
                 )
                 st.plotly_chart(fig, use_container_width=True)
     
+    def _display_chat(self):
+        """Display chat interface"""
+        st.subheader("Travel Assistant Chat")
+        
+        # Display chat history
+        for message in st.session_state.chat_history:
+            role = "user" if message["role"] == "user" else "assistant"
+            st.markdown(f"""
+            <div class="chat-message {'user-message' if role == 'user' else 'ai-message'}">
+                <strong>{'You' if role == 'user' else 'Travel Assistant'}:</strong>
+                <p>{message['content']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Chat input
+        user_input = st.text_input("Ask a travel question:", key="chat_input")
+        if user_input:
+            # Add user message to history
+            st.session_state.chat_history.append({
+                "role": "user",
+                "content": user_input
+            })
+            
+            # Generate response
+            with st.spinner("Thinking..."):
+                try:
+                    prompt = f"""
+                    You are a travel assistant. Continue this conversation based on the context:
+                    
+                    Previous conversation:
+                    {''.join([f"{m['role']}: {m['content']}\n" for m in st.session_state.chat_history[-3:]])}
+                    
+                    Current question: {user_input}
+                    
+                    Provide a helpful, concise response.
+                    """
+                    
+                    chain = LLMChain(llm=self.llm, prompt=PromptTemplate.from_template(prompt))
+                    response = chain.run({})
+                    
+                    # Add AI response to history
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": response
+                    })
+                    
+                    # Rerun to show new messages
+                    st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"Error generating response: {e}")
+    
     def run(self):
         """Run the main application"""
         # Sidebar
@@ -592,8 +774,8 @@ class TravelPlanner:
             # Navigation
             selected = option_menu(
                 menu_title=None,
-                options=["Plan Trip", "Saved Trips", "About"],
-                icons=["compass", "bookmark", "info-circle"],
+                options=["Plan Trip", "Saved Trips", "Chat", "About"],
+                icons=["compass", "bookmark", "chat", "info-circle"],
                 default_index=0
             )
             
@@ -603,6 +785,9 @@ class TravelPlanner:
                 return
             elif selected == "About":
                 self._display_about()
+                return
+            elif selected == "Chat":
+                self._display_chat()
                 return
         
         # Main content
@@ -637,6 +822,12 @@ class TravelPlanner:
                                 prompt = self._generate_travel_prompt(source, destination)
                                 chain = LLMChain(llm=self.llm, prompt=PromptTemplate.from_template(prompt))
                                 response = chain.run({})
+                                
+                                # Add to chat history
+                                st.session_state.chat_history.append({
+                                    "role": "user",
+                                    "content": f"Requested travel plan from {source} to {destination}"
+                                })
                                 
                                 # Parse response
                                 parsed_data = self._parse_travel_response(response)
@@ -732,6 +923,7 @@ class TravelPlanner:
         - Dining suggestions
         - Packing lists
         - Budget calculator
+        - Chat assistant
         """)
         
         st.sidebar.subheader("Tech Stack")
