@@ -60,8 +60,8 @@ class TravelPlanner:
             available_models = [m.name for m in genai.list_models() 
                               if 'generateContent' in m.supported_generation_methods]
             
-            if 'models/gemini-1.5-pro' in available_models:
-                self.model_name = "gemini-1.5-pro"
+            if 'models/gemini-2.0-flash-exp' in available_models:
+                self.model_name = "gemini-2.0-flash-exp"
             elif 'models/gemini-pro' in available_models:
                 self.model_name = "gemini-pro"
             else:
