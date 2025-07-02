@@ -57,13 +57,22 @@ class TravelPlanner:
         """Initialize the Gemini model"""
         try:
             genai.configure(api_key=self.gemini_api_key)
-            self.model_name = "gemini-2.0-flash-exp"
+            available_models = [m.name for m in genai.list_models() 
+                              if 'generateContent' in m.supported_generation_methods]
+            
+            if 'models/gemini-1.5-pro' in available_models:
+                self.model_name = "gemini-1.5-pro"
+            elif 'models/gemini-pro' in available_models:
+                self.model_name = "gemini-pro"
+            else:
+                st.warning("Gemini Pro not available, falling back to Gemini Flash")
+                self.model_name = "gemini-2.0-flash-exp"
                 
             self.llm = ChatGoogleGenerativeAI(
                 model=self.model_name,
                 google_api_key=self.gemini_api_key,
-                temperature=0.7,
-                max_output_tokens=2048
+                temperature=config["api"]["gemini"]["temperature"],
+                max_output_tokens=config["api"]["gemini"]["max_tokens"]
             )
         except Exception as e:
             st.error(f"Error initializing Gemini model: {e}")
@@ -134,135 +143,539 @@ class TravelPlanner:
         if 'saved_trips' not in st.session_state:
             st.session_state.saved_trips = []
     
+    def _get_weather(self, city: str) -> Optional[Dict]:
+        """Get weather data for a city"""
+        if not self.weather_api_key or not config["features"]["enable_weather"]:
+            return None
+            
+        try:
+            url = f"{config['api']['openweather']['base_url']}/weather?q={city}&appid={self.weather_api_key}&units=metric"
+            response = requests.get(url)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            st.warning(f"Could not fetch weather data: {e}")
+            return None
+    
     def _generate_travel_prompt(self, source: str, destination: str) -> str:
         """Generate the prompt for travel recommendations"""
         return f"""
         You are an expert travel planner assistant. Provide comprehensive travel options from {source} to {destination}. 
-        Include all transportation modes that are realistically available between these locations.
+        Include all relevant details and present the information in structured markdown format EXACTLY as specified.
+
+        ## Travel Options
         
-        Present the information in this exact structured markdown table format:
+        Create a detailed comparison table with the following columns. Fill ALL fields with realistic estimates:
         
-        | Mode | Price (USD) | Duration | Comfort (1-5) | Directness | Notes |
-        |------|------------|----------|--------------|------------|-------|
-        | Flight | [price] | [duration] | [comfort] | [direct/indirect] | [notes] |
-        | Train | [price] | [duration] | [comfort] | [direct/indirect] | [notes] |
-        | Bus | [price] | [duration] | [comfort] | [direct/indirect] | [notes] |
-        | Rental Car | [price] | [duration] | [comfort] | [direct] | [notes] |
-        | Taxi/Uber | [price] | [duration] | [comfort] | [direct] | [notes] |
+        | Mode | Price Range (USD) | Duration | Comfort (1-5) | Directness | Notes |
+        |------|------------------|----------|--------------|------------|-------|
+        | Flight | $300-$600 | 2h 30m | 5 | Direct | Book 2-3 months in advance |
+        | Train | $150-$300 | 4h 15m | 4 | Direct | Scenic route available |
+        | Bus | $50-$120 | 6h | 2 | Direct | Multiple daily departures |
+        | Rental Car | $70/day + fuel | 5h | 3 | Direct | Requires driver's license |
+        | Taxi/Uber | $400-$500 | 2h 45m | 4 | Direct | Most expensive option |
         
-        Rules:
-        1. Only include modes that are realistically available between these cities
-        2. Provide realistic estimates for price and duration
-        3. If a mode is not available, write "Not available" in the Notes column
-        4. Keep notes brief (1-2 sentences max)
+        IMPORTANT:
+        - Include ALL transportation modes listed above
+        - Provide REALISTIC estimates for each field
+        - Duration should be in hours/minutes format (e.g., "2h 30m")
+        - Price ranges should reflect current market rates
+        - Notes should include important considerations
         
-        After the table, provide a brief packing list (3-5 items per category) based on:
-        - The destination's typical weather
-        - Common activities there
-        - Cultural considerations
+        ## Destination Information
         
-        Categories:
-        - Clothing
-        - Essentials
-        - Documents
+        Provide detailed information about {destination} including:
+        
+        ### Top Attractions (5)
+        Name | Description | Entry Fee | Best Time to Visit
+        ---- | ----------- | --------- | ------------------
+        [Attraction 1] | [Brief description] | $X or Free | [Time recommendation]
+        [Attraction 2] | [Brief description] | $X or Free | [Time recommendation]
+        
+        ### Accommodation Options (5)
+        Name | Type | Price Range | Rating | Distance from Center
+        ---- | ---- | ----------- | ------ | --------------------
+        [Hotel 1] | [Hotel/Hostel/etc] | $X-$Y | 4.5/5 | 1.2 miles
+        [Hotel 2] | [Hotel/Hostel/etc] | $X-$Y | 4.2/5 | 0.5 miles
+        
+        ### Dining Recommendations (5)
+        Name | Cuisine | Price Range | Rating | Specialty
+        ---- | ------- | ----------- | ------ | ---------
+        [Restaurant 1] | [Cuisine type] | $X-$Y | 4.7/5 | [Signature dish]
+        [Restaurant 2] | [Cuisine type] | $X-$Y | 4.5/5 | [Signature dish]
+        
+        ### Local Tips
+        - Best time to visit: [Month/Season]
+        - Cultural norms to be aware of: [Important notes]
+        - Must-try local dishes: [Dish 1], [Dish 2]
+        - Transportation tips: [Key advice]
+        - Safety advice: [Important warnings]
+        
+        ## Packing Suggestions
+        Based on:
+        - Current season
+        - Local weather
+        - Cultural norms
+        - Planned activities
+        
+        Provide a categorized packing list with essentials:
+        
+        ### Clothing
+        - [Item 1]
+        - [Item 2]
+        
+        ### Toiletries
+        - [Item 1]
+        - [Item 2]
+        
+        ### Electronics
+        - [Item 1]
+        - [Item 2]
+        
+        ### Documents
+        - [Item 1]
+        - [Item 2]
+        
+        ### Miscellaneous
+        - [Item 1]
+        - [Item 2]
         """
+    
+    def _generate_packing_list(self, destination: str, weather_data: Optional[Dict] = None) -> str:
+        """Generate packing list based on destination and weather"""
+        weather_desc = weather_data['weather'][0]['description'] if weather_data else 'unknown'
+        temp = weather_data['main']['temp'] if weather_data else 'unknown'
+        
+        prompt = f"""
+        Create a detailed packing list for a trip to {destination}. Consider:
+        - Current weather: {weather_desc}
+        - Temperature: {temp}°C
+        - Typical activities (sightseeing, hiking, etc.)
+        - Cultural norms (modest clothing, etc.)
+        
+        Organize the list into categories:
+        
+        ### Clothing
+        - 
+        
+        ### Toiletries
+        - 
+        
+        ### Electronics
+        - 
+        
+        ### Documents
+        - 
+        
+        ### Miscellaneous
+        - 
+        
+        Provide specific recommendations based on the destination's characteristics.
+        """
+        
+        try:
+            chain = LLMChain(llm=self.llm, prompt=PromptTemplate.from_template(prompt))
+            return chain.run({})
+        except Exception as e:
+            return f"Could not generate packing list: {e}"
     
     def _parse_travel_response(self, response: str) -> Dict:
         """Parse the LLM response into structured data"""
         result = {
             "travel_options": [],
+            "attractions": [],
+            "accommodations": [],
+            "dining": [],
+            "tips": "",
             "packing": ""
         }
         
-        # Parse travel options table
-        table_match = re.search(r"\|.*Mode.*\|.*Price.*\|.*Duration.*\|.*Comfort.*\|.*Directness.*\|.*Notes.*\|([\s\S]+?)\n\n", response)
-        if table_match:
-            table_text = table_match.group(1)
-            rows = [row.strip() for row in table_text.split('\n') if row.strip()]
-            
-            for row in rows:
-                if not row.startswith('|'):
-                    continue
-                    
-                cells = [cell.strip() for cell in row.split('|')[1:-1]]
-                if len(cells) >= 6:
-                    option = {
-                        "Mode": cells[0],
-                        "Price (USD)": cells[1],
-                        "Duration": cells[2],
-                        "Comfort (1-5)": cells[3],
-                        "Directness": cells[4],
-                        "Notes": cells[5]
-                    }
-                    if "not available" not in option["Notes"].lower():
-                        result["travel_options"].append(option)
+        # Debug: Show raw response
+        if config.get("debug", False):
+            with st.expander("Debug: Raw Response"):
+                st.code(response)
         
-        # Parse packing list
-        packing_match = re.search(r"Categories:\s*([\s\S]+)$", response)
+        # Parse travel options - more flexible matching
+        travel_match = re.search(r"## Travel Options[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n##|\Z)", response)
+        if travel_match:
+            travel_table = travel_match.group(1).strip()
+            result["travel_options"] = self._parse_markdown_table(travel_table)
+            if config.get("debug", False):
+                with st.expander("Debug: Parsed Travel Options"):
+                    st.json(result["travel_options"])
+        
+        # Parse attractions
+        attractions_match = re.search(r"### Top Attractions[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n###|\Z)", response)
+        if attractions_match:
+            attractions_table = attractions_match.group(1).strip()
+            result["attractions"] = self._parse_markdown_table(attractions_table)
+        
+        # Parse accommodations
+        accommodations_match = re.search(r"### Accommodation Options[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n###|\Z)", response)
+        if accommodations_match:
+            accommodations_table = accommodations_match.group(1).strip()
+            result["accommodations"] = self._parse_markdown_table(accommodations_table)
+        
+        # Parse dining
+        dining_match = re.search(r"### Dining Recommendations[\s\S]+?(?:\n\s*\|?.+?\|?.+?\|\s*\n)([\s\S]+?)(?=\n\n###|\Z)", response)
+        if dining_match:
+            dining_table = dining_match.group(1).strip()
+            result["dining"] = self._parse_markdown_table(dining_table)
+        
+        # Parse tips
+        tips_match = re.search(r"### Local Tips\n([\s\S]+?)(?=\n\n##|\Z)", response)
+        if tips_match:
+            result["tips"] = tips_match.group(1).strip()
+        
+        # Parse packing
+        packing_match = re.search(r"## Packing Suggestions\n([\s\S]+?)(?=\Z)", response)
         if packing_match:
             result["packing"] = packing_match.group(1).strip()
         
         return result
     
+    def _parse_markdown_table(self, table_text: str) -> List[Dict]:
+        """Parse markdown table into list of dictionaries with improved handling"""
+        if not table_text:
+            return []
+            
+        lines = [line.strip() for line in table_text.split('\n') if line.strip()]
+        if len(lines) < 2:
+            return []
+        
+        # Handle both |-separated and space-aligned tables
+        if '|' in lines[0]:
+            # Remove empty columns from split
+            headers = [h.strip() for h in lines[0].split('|') if h.strip()]
+            data = []
+            
+            for line in lines[2:]:
+                values = [v.strip() for v in line.split('|') if v.strip()]
+                if len(values) == len(headers):
+                    data.append(dict(zip(headers, values)))
+        else:
+            # Handle space-aligned tables (less common)
+            headers = [h.strip() for h in re.split(r'\s{2,}', lines[0]) if h.strip()]
+            data = []
+            
+            for line in lines[2:]:
+                values = [v.strip() for v in re.split(r'\s{2,}', line) if v.strip()]
+                if len(values) == len(headers):
+                    data.append(dict(zip(headers, values)))
+        
+        return data
+    
     def _display_travel_options(self, options: List[Dict]):
-        """Display travel options in an interactive way"""
+        """Display travel options with improved validation and visualization"""
         st.subheader("Travel Options")
         
         if not options:
-            st.warning("No travel options available.")
+            st.error("""
+            No travel options could be generated. Possible reasons:
+            - The route between these cities may not exist
+            - The AI response format wasn't parsed correctly
+            - There was an error processing the data
+            """)
             return
         
-        df = pd.DataFrame(options)
-        
-        # Convert price to numeric for sorting
-        df['Numeric Price'] = df['Price (USD)'].str.extract(r'(\d+)').astype(float)
-        df = df.sort_values('Numeric Price')
-        
-        col1, col2 = st.columns(2)
+        try:
+            # Convert to DataFrame with validation
+            df = pd.DataFrame(options)
+            
+            # Validate required columns
+            required_cols = ['Mode', 'Price Range (USD)', 'Duration']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                st.error(f"Missing required columns: {', '.join(missing_cols)}")
+                return
+            
+            # Clean and process data
+            df['Price Min'] = df['Price Range (USD)'].str.extract(r'\$(\d+)').astype(float)
+            df['Price Max'] = df['Price Range (USD)'].str.extract(r'\$(\d+)[^\d]*$').astype(float)
+            df['Price Avg'] = (df['Price Min'] + df['Price Max']) / 2
+            
+            # Extract numeric comfort if available
+            if 'Comfort (1-5)' in df.columns:
+                df['Comfort'] = df['Comfort (1-5)'].str.extract(r'(\d)').astype(float)
+            
+            # Display
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.dataframe(df.drop(['Price Min', 'Price Max', 'Price Avg'], axis=1, errors='ignore'), 
+                            hide_index=True, 
+                            use_container_width=True)
+            
+            with col2:
+                # Price comparison
+                fig_price = px.bar(
+                    df,
+                    x='Mode',
+                    y='Price Avg',
+                    error_y=df['Price Max'] - df['Price Avg'],
+                    error_y_minus=df['Price Avg'] - df['Price Min'],
+                    title='Price Comparison (USD)',
+                    labels={'Price Avg': 'Average Price'},
+                    color='Mode'
+                )
+                st.plotly_chart(fig_price, use_container_width=True)
+                
+                # Comfort comparison if available
+                if 'Comfort' in df.columns:
+                    fig_comfort = px.bar(
+                        df,
+                        x='Mode',
+                        y='Comfort',
+                        title='Comfort Level (1-5)',
+                        color='Mode',
+                        range_y=[0, 5]
+                    )
+                    st.plotly_chart(fig_comfort, use_container_width=True)
+                
+        except Exception as e:
+            st.error(f"Error displaying travel options: {str(e)}")
+            if config.get("debug", False):
+                st.write("Options data:", options)
+
+    # [Rest of your methods remain unchanged...]
+    def _display_destination_map(self, destination: str):
+        """Display a map centered on the destination"""
+        if not config["features"]["enable_maps"]:
+            return
+            
+        try:
+            # Get coordinates (simplified - in production would use geocoding API)
+            m = folium.Map(location=[20, 0], zoom_start=2)
+            folium.Marker(
+                location=[20, 0],  # Placeholder - would use real coordinates
+                popup=destination,
+                tooltip=destination
+            ).add_to(m)
+            
+            folium_static(m, width=700, height=400)
+        except Exception as e:
+            st.warning(f"Could not display map: {e}")
+    
+    def _display_weather(self, weather_data: Optional[Dict]):
+        """Display weather information"""
+        if not weather_data or not config["features"]["enable_weather"]:
+            return
+            
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.dataframe(df.drop(columns=['Numeric Price']), hide_index=True, use_container_width=True)
+            st.metric("Temperature", f"{weather_data['main']['temp']}°C")
         
         with col2:
-            # Price comparison chart
-            fig_price = px.bar(
-                df, 
-                x='Mode', 
-                y='Numeric Price', 
-                title='Price Comparison',
-                color='Mode',
-                labels={'Numeric Price': 'Price (USD)'}
+            st.metric("Conditions", weather_data['weather'][0]['description'].title())
+        
+        with col3:
+            icon_url = config["api"]["openweather"]["icon_url"].format(
+                icon=weather_data['weather'][0]['icon']
             )
-            st.plotly_chart(fig_price, use_container_width=True)
+            st.image(icon_url, width=50)
+    
+    def _display_attractions(self, attractions: List[Dict]):
+        """Display top attractions"""
+        st.subheader("Top Attractions")
+        
+        if not attractions:
+            st.warning("No attraction information available.")
+            return
+        
+        for i, attraction in enumerate(attractions, 1):
+            with st.expander(f"{i}. {attraction.get('Name', '')}"):
+                col1, col2 = st.columns([1, 3])
+                
+                with col1:
+                    st.write(f"**Entry Fee:** {attraction.get('Entry Fee', 'Unknown')}")
+                    st.write(f"**Best Time:** {attraction.get('Best Time to Visit', 'Unknown')}")
+                
+                with col2:
+                    st.write(attraction.get('Description', 'No description available.'))
+    
+    def _display_accommodations(self, accommodations: List[Dict]):
+        """Display accommodation options"""
+        st.subheader("Accommodation Options")
+        
+        if not accommodations:
+            st.warning("No accommodation information available.")
+            return
+        
+        df = pd.DataFrame(accommodations)
+        st.dataframe(df, hide_index=True, use_container_width=True)
+    
+    def _display_dining(self, dining: List[Dict]):
+        """Display dining recommendations"""
+        st.subheader("Dining Recommendations")
+        
+        if not dining:
+            st.warning("No dining information available.")
+            return
+        
+        for i, restaurant in enumerate(dining, 1):
+            with st.container():
+                st.markdown(f"""
+                <div class="recommendation-card">
+                    <h4>{i}. {restaurant.get('Name', '')}</h4>
+                    <p><strong>Cuisine:</strong> {restaurant.get('Cuisine', 'Unknown')}</p>
+                    <p><strong>Price Range:</strong> {restaurant.get('Price Range', 'Unknown')}</p>
+                    <p><strong>Rating:</strong> {restaurant.get('Rating', 'Unknown')}</p>
+                    <p><strong>Specialty:</strong> {restaurant.get('Specialty', 'Unknown')}</p>
+                </div>
+                """, unsafe_allow_html=True)
+    
+    def _display_local_tips(self, tips: str):
+        """Display local tips"""
+        if not tips:
+            return
             
-            # Duration comparison chart
-            fig_duration = px.bar(
-                df, 
-                x='Mode', 
-                y='Duration', 
-                title='Duration Comparison',
-                color='Mode'
-            )
-            st.plotly_chart(fig_duration, use_container_width=True)
+        st.subheader("Local Tips")
+        st.markdown(tips)
     
     def _display_packing_list(self, packing: str):
-        """Display concise packing list"""
+        """Display packing list"""
         if not packing or not config["features"]["enable_packing"]:
             return
             
         st.subheader("Packing Suggestions")
+        st.markdown(packing)
+    
+    def _save_trip(self, source: str, destination: str, data: Dict):
+        """Save trip to session state"""
+        trip = {
+            "id": f"{source}-{destination}-{datetime.now().timestamp()}",
+            "source": source,
+            "destination": destination,
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "data": data
+        }
         
-        # Split into categories
-        categories = re.split(r"\n\s*-\s*", packing)
-        for category in categories:
-            if not category.strip():
-                continue
+        st.session_state.saved_trips.append(trip)
+        st.success("Trip saved successfully!")
+    
+    def _display_saved_trips(self):
+        """Display saved trips in sidebar"""
+        if not st.session_state.saved_trips:
+            st.sidebar.write("No saved trips yet.")
+            return
+            
+        st.sidebar.subheader("Saved Trips")
+        
+        for trip in st.session_state.saved_trips:
+            with st.sidebar.expander(f"{trip['source']} → {trip['destination']}"):
+                st.write(f"Date: {trip['date']}")
+                if st.button("Load", key=f"load_{trip['id']}"):
+                    st.session_state.travel_data = trip['data']
+                    st.session_state.destination_info = trip['data']
+                    st.experimental_rerun()
                 
-            category_name, *items = category.split('\n')
-            with st.expander(f"📦 {category_name.strip()}"):
-                for item in items:
-                    if item.strip():
-                        st.write(f"- {item.strip()}")
+                if st.button("Delete", key=f"delete_{trip['id']}"):
+                    st.session_state.saved_trips = [
+                        t for t in st.session_state.saved_trips 
+                        if t['id'] != trip['id']
+                    ]
+                    st.experimental_rerun()
+    
+    def _display_budget_calculator(self):
+        """Display budget calculator"""
+        if not config["features"]["enable_budget"]:
+            return
+            
+        with st.expander("💰 Trip Budget Calculator"):
+            st.write("Estimate your total trip cost based on selected options.")
+            
+            if not st.session_state.travel_data or not st.session_state.travel_data.get('travel_options'):
+                st.warning("Generate travel options first to use the budget calculator.")
+                return
+                
+            travel_options = st.session_state.travel_data['travel_options']
+            accommodations = st.session_state.destination_info['accommodations'] if st.session_state.destination_info else []
+            dining_options = st.session_state.destination_info['dining'] if st.session_state.destination_info else []
+            
+            # Travel selection
+            st.subheader("Transportation")
+            transport_mode = st.selectbox(
+                "Select your transportation",
+                [opt['Mode'] for opt in travel_options]
+            )
+            
+            # Accommodation selection
+            st.subheader("Accommodation")
+            if accommodations:
+                accommodation = st.selectbox(
+                    "Select your accommodation",
+                    [acc['Name'] for acc in accommodations]
+                )
+                nights = st.number_input("Number of nights", min_value=1, value=3)
+            else:
+                st.warning("No accommodation data available.")
+                accommodation = None
+                nights = 0
+            
+            # Dining selection
+            st.subheader("Dining")
+            if dining_options:
+                meals_per_day = st.number_input("Meals per day", min_value=1, max_value=10, value=3)
+                avg_meal_cost = st.number_input("Average meal cost (USD)", min_value=0, value=15)
+            else:
+                st.warning("No dining data available.")
+                meals_per_day = 0
+                avg_meal_cost = 0
+            
+            # Activities
+            st.subheader("Activities")
+            activities_cost = st.number_input("Estimated activities cost (USD)", min_value=0, value=100)
+            
+            # Calculate total
+            if st.button("Calculate Budget"):
+                # Get transport cost
+                try:
+                    transport_cost = next(
+                        (float(re.search(r'\$(\d+)', opt['Price Range (USD)']).group(1))
+                        for opt in travel_options 
+                        if opt['Mode'] == transport_mode)
+                    )
+                except:
+                    transport_cost = 0
+                
+                # Get accommodation cost
+                if accommodation:
+                    try:
+                        acc_cost = next(
+                            float(re.search(r'\$(\d+)', acc['Price Range']).group(1))
+                            for acc in accommodations 
+                            if acc['Name'] == accommodation)
+                        acc_total = acc_cost * nights
+                    except:
+                        acc_total = 0
+                else:
+                    acc_total = 0
+                
+                # Calculate dining total
+                dining_total = meals_per_day * avg_meal_cost * nights
+                
+                # Calculate total
+                total = transport_cost + acc_total + dining_total + activities_cost
+                
+                # Display results
+                st.success(f"Estimated Total Budget: ${total:,.2f}")
+                
+                # Breakdown
+                st.write("### Budget Breakdown")
+                breakdown = {
+                    "Transportation": transport_cost,
+                    "Accommodation": acc_total,
+                    "Dining": dining_total,
+                    "Activities": activities_cost
+                }
+                
+                fig = px.pie(
+                    names=list(breakdown.keys()),
+                    values=list(breakdown.values()),
+                    title="Budget Distribution"
+                )
+                st.plotly_chart(fig, use_container_width=True)
     
     def run(self):
         """Run the main application"""
@@ -279,7 +692,11 @@ class TravelPlanner:
                 default_index=0
             )
             
-            if selected == "About":
+            # Display saved trips if any
+            if selected == "Saved Trips":
+                self._display_saved_trips()
+                return
+            elif selected == "About":
                 self._display_about()
                 return
         
@@ -287,7 +704,7 @@ class TravelPlanner:
         st.title("✈️ AI Travel Planner Pro")
         
         # Tab layout
-        tab1, tab2 = st.tabs(["Plan Your Trip", "Trip Tools"])
+        tab1, tab2, tab3 = st.tabs(["Plan Your Trip", "Destination Info", "Trip Tools"])
         
         with tab1:
             with st.form("travel_form"):
@@ -307,6 +724,10 @@ class TravelPlanner:
                     else:
                         with st.spinner("Generating travel recommendations..."):
                             try:
+                                # Get weather data
+                                weather_data = self._get_weather(destination)
+                                st.session_state.weather_data = weather_data
+                                
                                 # Generate travel recommendations
                                 prompt = self._generate_travel_prompt(source, destination)
                                 chain = LLMChain(llm=self.llm, prompt=PromptTemplate.from_template(prompt))
@@ -315,6 +736,12 @@ class TravelPlanner:
                                 # Parse response
                                 parsed_data = self._parse_travel_response(response)
                                 st.session_state.travel_data = parsed_data
+                                st.session_state.destination_info = parsed_data
+                                
+                                # Generate packing list
+                                if config["features"]["enable_packing"]:
+                                    packing_list = self._generate_packing_list(destination, weather_data)
+                                    st.session_state.destination_info['packing'] = packing_list
                                 
                                 st.success("Travel plan generated successfully!")
                             except Exception as e:
@@ -323,10 +750,56 @@ class TravelPlanner:
             # Display results if available
             if st.session_state.travel_data:
                 self._display_travel_options(st.session_state.travel_data['travel_options'])
-                self._display_packing_list(st.session_state.travel_data['packing'])
+                
+                # Save trip button
+                if config["features"]["enable_saving"]:
+                    if st.button("💾 Save This Trip"):
+                        self._save_trip(
+                            source,
+                            destination,
+                            st.session_state.travel_data
+                        )
         
         with tab2:
+            if st.session_state.destination_info:
+                # Destination overview
+                st.header(f"🌍 {destination} Overview")
+                
+                # Weather display
+                if config["features"]["enable_weather"]:
+                    st.subheader("Current Weather")
+                    if st.session_state.weather_data:
+                        self._display_weather(st.session_state.weather_data)
+                    else:
+                        st.warning("Weather data not available.")
+                
+                # Map display
+                if destination and config["features"]["enable_maps"]:
+                    st.subheader("Destination Map")
+                    self._display_destination_map(destination)
+                
+                # Display destination info
+                self._display_attractions(st.session_state.destination_info['attractions'])
+                self._display_accommodations(st.session_state.destination_info['accommodations'])
+                self._display_dining(st.session_state.destination_info['dining'])
+                self._display_local_tips(st.session_state.destination_info['tips'])
+                self._display_packing_list(st.session_state.destination_info['packing'])
+            else:
+                st.info("Generate a travel plan first to see destination information.")
+        
+        with tab3:
             st.header("Trip Tools")
+            
+            # Budget calculator
+            self._display_budget_calculator()
+            
+            # Packing list generator
+            if config["features"]["enable_packing"]:
+                with st.expander("🧳 Packing List Generator"):
+                    if st.session_state.destination_info and st.session_state.destination_info.get('packing'):
+                        st.markdown(st.session_state.destination_info['packing'])
+                    else:
+                        st.warning("Generate a travel plan first to get packing suggestions.")
             
             # Travel tips
             with st.expander("💡 Travel Tips"):
@@ -346,6 +819,16 @@ class TravelPlanner:
         This application uses Google's Gemini AI to provide comprehensive travel planning assistance.
         """)
         
+        st.sidebar.subheader("Features")
+        st.sidebar.write("""
+        - Multi-modal travel options
+        - Destination information
+        - Accommodation recommendations
+        - Dining suggestions
+        - Packing lists
+        - Budget calculator
+        """)
+        
         st.sidebar.subheader("Tech Stack")
         st.sidebar.write("""
         - Python
@@ -353,6 +836,7 @@ class TravelPlanner:
         - LangChain
         - Google Gemini
         - Plotly
+        - Folium
         """)
 
 # Run the application
